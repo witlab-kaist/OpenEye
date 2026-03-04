@@ -12,7 +12,7 @@ def normalize_neon_xy(xy_np: np.ndarray, width: int, height: int) -> np.ndarray:
     out[:, 1] = (xy_np[:, 1] / float(height)) * 2.0 - 1.0
     return out
 
-# 1) Biquadratic
+# ---- Biquadratic ----
 def _biquad_features(xy: np.ndarray) -> np.ndarray:
     x = xy[:, 0]; y = xy[:, 1]
     return np.stack([x, y, x*x, y*y, x*y, np.ones_like(x)], axis=1)
@@ -30,7 +30,7 @@ def predict_biquad(model: Dict, neon_xy_n: np.ndarray) -> np.ndarray:
     F = _biquad_features(neon_xy_n)
     return (W @ F.T).T
 
-# 2) Ridge Biquadratic
+# ---- Ridge Biquadratic ----
 def _ridge_regression(X: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
     n_features = X.shape[1]
     I = np.eye(n_features)
@@ -49,8 +49,7 @@ def predict_ridge_biquad(model: Dict, neon_xy_n: np.ndarray) -> np.ndarray:
     F = _biquad_features(neon_xy_n)
     return (W @ F.T).T
 
-# ====== I/O helpers ======
-
+# ---- I/O helpers ----
 def save_models(model_dir: str, biquad: Dict | None, ridge: Dict | None) -> None:
     os.makedirs(model_dir, exist_ok=True)
     if biquad:

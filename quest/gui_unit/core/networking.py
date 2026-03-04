@@ -21,10 +21,10 @@ class TcpServer(threading.Thread):
             self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server.bind((HOST, PORT))
             self.server.listen(1)
-            self.status_cb(f"waiting...{HOST}:{PORT}")
+            self.status_cb(f"Waiting...{HOST}:{PORT}")
 
             self.conn, self.addr = self.server.accept()
-            self.status_cb(f"✅: {self.addr}")
+            self.status_cb(f"Connected: {self.addr}")
         except Exception as e:
             self.status_cb(f"TCP error: {e}")
 

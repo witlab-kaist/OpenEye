@@ -1,54 +1,57 @@
+import argparse
 import sys
 import os
 import threading
 import time
 import json
-import pandas as pd
-import numpy as np
-
+from pathlib import Path
 from typing import Optional, List, Dict
 
+import pandas as pd
+import numpy as np
 # ---- PySide6 GUI ----
-from PySide6.QtCore import Qt, QTimer, QPointF, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, QPointF
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QCheckBox, QSpinBox, QGroupBox, QLineEdit, QMessageBox
+    QLabel, QPushButton, QCheckBox, QSpinBox, QGroupBox, QMessageBox
 )
-
+# ---- Pupil Labs Real-Time API ----
 from pupil_labs.realtime_api.simple import discover_one_device
-from networking import TcpServer, EvalPlanStreamer
-from filter import ButterLPFilter
-from async_json_logger import AsyncJSONLLogger
-from mapping_core import (
+
+# ==============================
+# Local
+# ==============================
+from ..core.config import DEFAULT_CONFIG as CFG
+from ..core.networking import TcpServer, EvalPlanStreamer
+from ..core.filter import ButterLPFilter
+from ..core.logger import JsonLogger
+from ..core.mapping import (
     normalize_neon_xy,
     map_biquadratic, map_ridge_biquadratic,
     predict_biquad, predict_ridge_biquad,
-    save_models, load_models
+    save_models, load_models,
 )
 
-# ============ Config ============
-CANVAS_W, CANVAS_H = 1600, 1200
+# =========================================================
+# Configuration
+# =========================================================
 
-FS = 200
-FC = 15.0
-LP_ORDER = 2
+CANVAS_W = CFG.canvas.width_px
+CANVAS_H = CFG.canvas.height_px
 
-RIDGE_ALPHA = 0.01
-WINDOW_WIDTH = 100
+EVAL_RATE_HZ = CFG.eval.rate_hz
+EVAL_DURATION_S = CFG.eval.duration_s
+EVAL_DWELL_MS = CFG.eval.dwell_ms
+H_RANGE_DEG = CFG.eval.h_range_deg
+V_RANGE_DEG = CFG.eval.v_range_deg
 
-EVAL_RATE_HZ = 5
-EVAL_DRUATION_S = 30
-EVAL_DWELL_MS = 1000
-H_RANGE_DEG = (-15.0, 15.0)
-V_RANGE_DEG = (-10.0, 10.0)
-VIEW_DISTANCE_M = 1.0
-MIN_SACCADE_AMP_DEG = 3.0
-
-def generate_calib_targets(h_range_deg=H_RANGE_DEG,
-                           v_range_deg=V_RANGE_DEG,
-                           view_dist_m=VIEW_DISTANCE_M,
-                           grid_size=(5, 5)):
+def generate_calib_targets(
+    h_range_deg=H_RANGE_DEG,
+    v_range_deg=V_RANGE_DEG,
+    view_dist_m=CFG.eval.view_distance_m,
+    grid_size=(5, 5),
+):
     cols, rows = grid_size
     h_deg = np.linspace(h_range_deg[0], h_range_deg[1], cols)
     v_deg = np.linspace(v_range_deg[1], v_range_deg[0], rows)
@@ -64,7 +67,10 @@ def generate_calib_targets(h_range_deg=H_RANGE_DEG,
 
 CALIB_TARGET_COORDINATES = generate_calib_targets()
 
-# ============ Collectors ============
+# ==============================
+# Data / threads
+# ==============================
+
 class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -88,7 +94,7 @@ class SharedState:
         with self.lock:
             self.latest_gaze_filtered = (x, y)
     
-    def append_gaze_log(self, ts, raw_x, raw_y, filt_x, filt_y, event: str=""):
+    def append_gaze_log(self, ts, filt_x, filt_y, raw_x, raw_y, event: str=""):
         with self.lock:
             self.gaze_log.append((float(ts), float(filt_x), float(filt_y), float(raw_x), float(raw_y), event))
     
@@ -111,11 +117,11 @@ class SharedState:
         with self.lock:
             self.datum_lines.append(line)
     
-    # ==== evaluation logging ====
+    # ---- evaluation logging ----
     def start_evaluation(self, log_path: str, models: dict, canvas_w: int, canvas_h: int):
         self.models = models or {}
         self.canvas_w, self.canvas_h = int(canvas_w), int(canvas_h)
-        self.eval_logger = AsyncJSONLLogger(log_path, flush_every=100, flush_ms=100)
+        self.eval_logger = JsonLogger(log_path, flush_every=100, flush_ms=100)
         self.eval_logger.start()
         self.eval_active = True
 
@@ -142,11 +148,11 @@ class SharedState:
         }
         self.eval_logger.log(msg)
     
-    # === gaze tracking logging ===
+    # ---- gaze tracking logging ----
     def start_tracking(self, log_path: str, models: dict, canvas_w: int, canvas_h: int):
         self.models = models or {}
         self.canvas_w, self.canvas_h = int(canvas_w), int(canvas_h)
-        self.tracking_logger = AsyncJSONLLogger(log_path, flush_every=100, flush_ms=100)
+        self.tracking_logger = JsonLogger(log_path, flush_every=100, flush_ms=100)
         self.tracking_logger.start()
         self.tracking_active = True
     
@@ -184,11 +190,11 @@ class SharedState:
         return out
 
 class GazeCollector(threading.Thread):
-    def __init__(self, device, state: SharedState, lp_filter: ButterLPFilter):
+    def __init__(self, device, state: SharedState, filter: ButterLPFilter):
         super().__init__(daemon=True)
         self.device = device
         self.state = state
-        self.lp_filter = lp_filter
+        self.filter = filter
         self.on_new_filtered = None
 
     def run(self):
@@ -197,7 +203,7 @@ class GazeCollector(threading.Thread):
             x, y = datum.x, datum.y
             ts = datum.timestamp_unix_seconds
 
-            x_f, y_f = self.lp_filter.step(x, y)
+            x_f, y_f = self.filter.step(x, y)
             self.state.update_latest_filtered_gaze(x_f, y_f)
             if self.on_new_filtered is not None:
                 try: self.on_new_filtered(ts, x_f, y_f, x, y)
@@ -207,9 +213,12 @@ class GazeCollector(threading.Thread):
             if self.state.recording:
                 self.state.add_datum(datum)
                 event = self.state.consume_event()
-                self.state.append_gaze_log(ts, x, y, x_f, y_f, event)
+                self.state.append_gaze_log(ts, x_f, y_f, x, y, event)
 
-# ============ GUI ============
+# ==============================
+# GUI widgets
+# ==============================
+
 class GazeCanvas(QLabel):
     def __init__(self):
         super().__init__()
@@ -229,7 +238,7 @@ class GazeCanvas(QLabel):
         painter.drawRect(2, 2, CANVAS_W-4, CANVAS_H-4)
         painter.setPen(QPen(QColor(200, 200, 200), 1))
         painter.setFont(QFont("Arial", 28))
-        painter.drawText(20, 50, "1600 x 1200 Gaze Canvas")
+        painter.drawText(20, 50, f"{CANVAS_W} x {CANVAS_H} Gaze Canvas")
 
         if x is not None and y is not None:
             px = int(max(0, min(CANVAS_W - 1, x)))
@@ -247,10 +256,14 @@ class GazeCanvas(QLabel):
         painter.end()
         self.setPixmap(self.pix)
 
+# ==============================
+# Main window
+# ==============================
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("HMD-EyeTracker Calibration")
+        self.setWindowTitle("Quest-Neon Calibration")
         self.state = SharedState()
         self.device = None
         self.gaze_thread: Optional[GazeCollector] = None
@@ -261,17 +274,16 @@ class MainWindow(QMainWindow):
         self.tracking_active = False
         
         self.participant_dir = None
-        self.nine_dir = None
+        self.calib_dir = None
         self.eval_log_path = None
         self.eval_log_dir = None
 
-        self.gv_rate_hz = 30                          # sending Hz
+        self.gv_rate_hz = 30
         self._gv_lock = threading.Lock()
-        self._gv_latest_raw = None                    # (ts, x_f, y_f)
+        self._gv_latest_raw = None
         self.gaze_tx_timer = QTimer(self)
         self.gaze_tx_timer.timeout.connect(self._tick_send_gaze)
 
-        # --- UI ---
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -290,7 +302,6 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.step_label)
 
         self.canvas = GazeCanvas()
-
         task_box = QGroupBox("Tasks"); task_layout = QHBoxLayout(task_box)
 
         self.btn_eval = QPushButton("Start Evaluation")
@@ -328,7 +339,7 @@ class MainWindow(QMainWindow):
         self.shortcut_q.setContext(Qt.ApplicationShortcut)
         self.shortcut_q.activated.connect(self.cleanup_and_close)
 
-    # ---------- Helpers ----------
+    # ---- Helpers ----
     def status_tcp(self, msg):
         self.tcp_status.setText(f"TCP: {msg}")
 
@@ -341,10 +352,10 @@ class MainWindow(QMainWindow):
         p_num = self.p_spin.value()
         participant_id = f"t{p_num:02d}"
         self.participant_dir = participant_id
-        self.nine_dir = os.path.join(self.participant_dir, "nine_dot_calibration")
-        os.makedirs(self.nine_dir, exist_ok=True)
+        self.calib_dir = os.path.join(self.participant_dir, "calibration")
+        os.makedirs(self.calib_dir, exist_ok=True)
     
-    def stream_gaze_visual(self, ts: float, x_f: float, y_f: float, x_raw: float, y_raw: float):
+    def stream_gaze_visual(self, ts: float, x_f: float, y_f: float):
         with self._gv_lock:
             self._gv_latest_raw = (float(ts), float(x_f), float(y_f))
 
@@ -368,22 +379,22 @@ class MainWindow(QMainWindow):
         self.tcp_thread.send_gaze_visual(ts, float(xy[0]), float(xy[1]))
 
 
-    # ---------- Neon ----------
+    # ---- Neon ----
     def on_connect_neon(self):
         try:
             self.ensure_dirs()
             self.neon_status.setText("Neon: ")
             device = discover_one_device(max_search_duration_seconds=10)
             if device is None:
-                self.neon_status.setText("Neon: ❌")
+                self.neon_status.setText("Neon: No device found")
                 QMessageBox.warning(self, "Neon", "No device found.")
                 return
             self.device = device
-            self.neon_status.setText("Neon: ✅")
+            self.neon_status.setText("Neon: Connected")
 
             self.state.running = True
-            lp = ButterLPFilter(fs=FS, fc=FC, order=LP_ORDER)
-            self.gaze_thread = GazeCollector(self.device, self.state, lp_filter=lp)
+            filter = ButterLPFilter(fs=CFG.filt.fs_hz, fc=CFG.filt.fc_hz, order=CFG.filt.order)
+            self.gaze_thread = GazeCollector(self.device, self.state, filter=filter)
             self.gaze_thread.on_new_filtered = self.stream_gaze_visual
             self.gaze_thread.start()
 
@@ -391,7 +402,7 @@ class MainWindow(QMainWindow):
             self.neon_status.setText(f"Neon Error: {e}")
             QMessageBox.critical(self, "Neon Error", str(e))
 
-    # ---------- REC ----------
+    # ---- REC ----
     def on_start_recording(self):
         if self.state.recording:
             QMessageBox.information(self, "Recording", "Already recording.")
@@ -402,7 +413,7 @@ class MainWindow(QMainWindow):
         self.state.recording = True
         self.step_label.setText("Step: 0")
 
-    # ---------- TCP ----------
+    # ---- TCP ----
     def on_start_tcp(self):
         if self.tcp_thread and self.tcp_thread.conn:
             self.status_tcp("already connected")
@@ -410,7 +421,7 @@ class MainWindow(QMainWindow):
         self.tcp_thread = TcpServer(self.status_tcp)
         self.tcp_thread.start()
 
-    # ---------- Evaluation ----------
+    # ---- Evaluation ----
     def start_evaluation_logging(self):
         self.ensure_dirs()
         self.eval_dir = os.path.join(self.participant_dir, "evaluation")
@@ -423,7 +434,7 @@ class MainWindow(QMainWindow):
 
     def on_toggle_evaluation(self):
         if not self.device or not self.gaze_thread:
-            QMessageBox.information(self, "Info", "Connect Noen")
+            QMessageBox.information(self, "Info", "Connect Neon")
             return
         if not (self.tcp_thread and self.tcp_thread.conn):
             QMessageBox.information(self, "Info", "Start TCP server")
@@ -492,7 +503,7 @@ class MainWindow(QMainWindow):
             return False
         return True
     
-    # --------- Random Saccade Function ---------
+    # ---- Random Saccade Function ----
     def _deg_to_m(self, deg_x: float, deg_y: float, distance_m: float=1.0):
         rad_x = np.deg2rad(deg_x)
         rad_y = np.deg2rad(deg_y)
@@ -509,14 +520,14 @@ class MainWindow(QMainWindow):
             if prev_deg is None:
                 return float(dx), float(dy)
             dist = np.hypot(dx - prev_deg[0], dy - prev_deg[1])
-            if dist >= MIN_SACCADE_AMP_DEG:
+            if dist >= CFG.eval.min_saccade_amp_deg:
                 return float(dx), float(dy)
         return float(dx), float(dy)
     
     def build_and_save_random_saccade_plan(self):
         self.ensure_dirs()
 
-        frames_total = int(EVAL_DRUATION_S * EVAL_RATE_HZ)
+        frames_total = int(EVAL_DURATION_S * EVAL_RATE_HZ)
         frames_per_target = max(1, int(round(EVAL_DWELL_MS * EVAL_RATE_HZ / 1000)))
 
         timeline = []
@@ -551,7 +562,7 @@ class MainWindow(QMainWindow):
             "meta": {
                 "rate_hz": EVAL_RATE_HZ,
                 "dwell_ms": EVAL_DWELL_MS,
-                "duration_s": EVAL_DRUATION_S,
+                "duration_s": EVAL_DURATION_S,
                 "frames_total": frames_total,
             },
             "timeline": timeline
@@ -565,7 +576,7 @@ class MainWindow(QMainWindow):
         print(f"[EVAL] saved: {self.plan_path}")
         return self.plan_path
 
-    # ---------- Step / End ----------
+    # ---- Step / End ----
     def trigger_step(self):
         if self.state.ended:
             return
@@ -586,9 +597,9 @@ class MainWindow(QMainWindow):
                 self.save_csv()
                 self.state.recording = False
 
-    # ---------- Save ----------
+    # ---- Save ----
     def save_csv(self):
-        if not self.nine_dir:
+        if not self.calib_dir:
             self.ensure_dirs()
         
         gaze_rows = self.state.snapshot_gaze_log()
@@ -599,16 +610,16 @@ class MainWindow(QMainWindow):
             )
             last = df.index[-1]
             df.at[last, "event_log"] = "event_log"
-            gaze_csv = os.path.join(self.nine_dir, "calibration_gaze_log.csv")
-            df.to_csv(gaze_csv, index=False)
+            calib_csv = os.path.join(self.calib_dir, "calibration_log.csv")
+            df.to_csv(calib_csv, index=False)
         else:
-            gaze_csv = None
+            calib_csv = None
 
-        pairs_csv = self.build_mapping(gaze_csv) if gaze_csv else None
+        pairs_csv = self.build_mapping(calib_csv) if calib_csv else None
         if pairs_csv:
             self.build_and_save_models(pairs_csv)
         
-        datum_path = os.path.join(self.nine_dir, "raw_neon_data.jsonl")
+        datum_path = os.path.join(self.calib_dir, "raw_neon_data.jsonl")
         with self.state.lock:
             lines = list(self.state.datum_lines)
         if lines:
@@ -616,11 +627,11 @@ class MainWindow(QMainWindow):
                 for line in lines:
                     f.write(line+"\n")
 
-    # ---------- Mapping ----------
-    def build_mapping(self, gaze_csv_path: str, window: int=WINDOW_WIDTH):
-        if not os.path.exists(gaze_csv_path):
+    # ---- Mapping ----
+    def build_mapping(self, calib_csv_path: str, window: int=CFG.mapping.window_width):
+        if not os.path.exists(calib_csv_path):
             return None
-        df = pd.read_csv(gaze_csv_path)
+        df = pd.read_csv(calib_csv_path)
         ev = df["event_log"].astype(str).fillna("")
         event_idxs = list(np.flatnonzero(ev == "event_log"))[:25]
         if not event_idxs:
@@ -642,7 +653,7 @@ class MainWindow(QMainWindow):
                 "avg_gaze_y": avg_gy
             })
         out_df = pd.DataFrame(rows)
-        out_path = os.path.join(self.nine_dir, "calibration_pair.csv")
+        out_path = os.path.join(self.calib_dir, "calibration_pair.csv")
         out_df.to_csv(out_path, index=False)
         return out_path
     
@@ -655,14 +666,14 @@ class MainWindow(QMainWindow):
         canvas_size = (CANVAS_W, CANVAS_H)
 
         biquad_model = map_biquadratic(neon_xy, vp_xy, canvas_size)
-        ridge_model = map_ridge_biquadratic(neon_xy, vp_xy, canvas_size, alpha=RIDGE_ALPHA)
+        ridge_model = map_ridge_biquadratic(neon_xy, vp_xy, canvas_size, alpha=CFG.mapping.ridge_alpha)
 
         model_path = os.path.join(self.participant_dir, "models")
         save_models(model_path, biquad_model, ridge_model)
         
         return model_path
 
-    # ---------- Cleanup ----------
+    # ---- Cleanup ----
     def cleanup_and_close(self):
         self.state.running = False
         time.sleep(0.1)
@@ -677,13 +688,17 @@ class MainWindow(QMainWindow):
         except Exception: pass
         self.close()
 
-# ============ main ============
-def main():
+# ==============================
+# Main
+# ==============================
+
+def main(argv=None) -> int:
+    
     app = QApplication(sys.argv)
     w = MainWindow()
     w.resize(800, 500)
     w.show()
-    sys.exit(app.exec())
+    return app.exec()
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

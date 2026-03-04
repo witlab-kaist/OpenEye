@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from typing import Tuple
 from scipy.signal import butter, lfilter, lfilter_zi
 
