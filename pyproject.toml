@@ -18,6 +18,7 @@ dependencies = [
 openeye-quest-gui = "quest.gui_unit.app.app:main"
 openeye-avp-gui = "avp.gui_unit.app.app:main"
 openeye-xreal-gui = "xreal.gui_unit.app.app:main"
+openeye-xreal-processing = "xreal.processing_unit.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
