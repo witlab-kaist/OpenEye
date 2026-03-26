@@ -1,0 +1,40 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bbb281ee3bf0b054c82ac2347e9e782c, type: 3}
+  m_Name: NeonXR Group
+  m_EditorClassIdentifier: 
+  m_GroupName: NeonXR Group
+  m_Data:
+    m_SerializedData: []
+  m_GUID: d8af1e490ba65ac4cbd40ce497b84ca2
+  m_SerializeEntries:
+  - m_GUID: 26faabbcc94fd10408ec6a88c7137f3a
+    m_Address: pl.calibration
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: e98d692cd685a4a4393185fecd424d3e
+    m_Address: pl.config
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  - m_GUID: 80a206b3b2ba66d4b900bbab2680ee6a
+    m_Address: pl.config.defaults
+    m_ReadOnly: 0
+    m_SerializedLabels: []
+    FlaggedDuringContentUpdateRestriction: 0
+  m_ReadOnly: 0
+  m_Settings: {fileID: 11400000, guid: 1cb6ca36609387344abc75d74ee289a1, type: 2}
+  m_SchemaSet:
+    m_Schemas:
+    - {fileID: 11400000, guid: 1db822460eaf6414eaff77f354bb1252, type: 2}
+    - {fileID: 11400000, guid: fa5cf095d7ff967408a3892c3f8e3610, type: 2}
