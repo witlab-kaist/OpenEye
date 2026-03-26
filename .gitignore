@@ -37,7 +37,7 @@ xcuserdata/
 
 # Swift Package Manager
 .build/
-Packages/
+# Packages/
 Package.resolved
 
 # macOS
